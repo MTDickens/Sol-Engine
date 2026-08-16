@@ -8,24 +8,65 @@ initial frame.
 
 ## End to end
 
+From a clean box to running videos. Steps 1-3 are one-time.
+
 ```bash
-# 1. Pull the dataset and convert it into a prompt list. Downloads a snapshot
+# 1. Repository. The default branch is main; this runtime lives on sol-engine.
+git clone https://github.com/MTDickens/Sol-Engine.git
+cd Sol-Engine
+git switch sol-engine
+
+# 2. Host environment. Only the launcher and the prompt builder run here -- the
+#    GPU stack lives in the pinned SGLang image -- so this stays small.
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install huggingface_hub pyyaml
+
+# 3. Weights: the released BF16 FL2VA checkpoint, 269 GiB. HF_HOME must point at
+#    a disk that has room for it.
+export HF_HOME=/large/disk/hf
+hf auth login                      # only if the repo is gated for you
+hf download MiniMaxAI/MiniMax-H3
+
+# 4. Pull StEvo-Bench and convert it into a prompt list. Downloads a snapshot
 #    (no .git), writes models/minimax_h3/stevo_bench/{prompts.json,frames/},
 #    deletes the download again.
 python3 scripts/build_stevo_bench_prompts.py
 
-# 2. Decide the GPU grouping from the topology: NV-linked quads first.
+# 5. Decide the GPU grouping from the topology. With NVSwitch every pair is
+#    NV-linked, so group along the CPU socket boundary instead.
 nvidia-smi -L
 nvidia-smi topo -m
 
-# 3. Generate. One group of four, or as many disjoint quads as the node has.
+# 6. Generate. One group of four, or as many disjoint quads as the node has.
 python3 scripts/run.py config/minimax_h3/minimax_h3_a100_batch.toml \
   --set H3_PROMPTS_FILE=models/minimax_h3/stevo_bench/prompts.json \
-  --set H3_GPU_GROUPS="[0,1,2,3], [4,5,6,7]"
+  --set H3_GPU_GROUPS="[0,1,2,3], [4,5,6,7]" \
+  --set H3_CONTAINER_RUNTIME=apptainer \
+  --set H3_MODEL_PATH=/large/disk/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/<rev>
 ```
 
-More than one group also needs `[slurm].gpus_per_node = 4 x groups` in the
-config; `--set` cannot reach a nested key.
+`H3_CONTAINER_RUNTIME` follows the machine, not the run, and the config defaults
+to the Slurm one:
+
+- **Bare node** (a Brev instance, a workstation): `apptainer` or `singularity`,
+  which makes the launcher pull the pinned image itself. `none` runs in the
+  ambient environment instead, and only works if that environment *is* the
+  pinned SGLang build -- the runtime hard-checks torch `2.11.0+cu130` and Triton
+  `3.6.0` and refuses anything else. The venv in step 2 is not it.
+- **Slurm with pyxis:** the config default, nothing to set. Two groups then also
+  need `[slurm].gpus_per_node = 8`, which is a nested key that has to be edited
+  in the config -- `--set` cannot reach it.
+
+Either way the whole run is one container: the launcher fans the groups out as
+processes with `CUDA_VISIBLE_DEVICES` pinned, not as separate jobs.
+
+For a container run every path involved -- the repository, the prompt list,
+`frames/`, the cache, the output directory, and a local checkpoint -- has to sit
+below `H3_STORAGE_ROOT`, which is mounted at `/h3`. It defaults to the
+repository root, so put the clone and `HF_HOME` on the same large disk, or set
+`--set H3_STORAGE_ROOT=/large/disk` and keep everything under it. Drop
+`H3_MODEL_PATH` entirely to pull the weights from the Hub inside the container.
 
 ## Selecting task sets
 
