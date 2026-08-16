@@ -87,6 +87,7 @@ tests/test_workflow_managed_codex.py
 # benchmarks and video-comparison helpers. They are how the methods were
 # checked, not the methods.
 scripts/*
+!scripts/build_*_prompts.py
 !scripts/run.py
 !scripts/launch_config.py
 !scripts/collect_run.py

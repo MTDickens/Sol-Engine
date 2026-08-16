@@ -1,0 +1,53 @@
+id = "minimax_h3_a100_batch"
+kind = "optimized"
+purpose = "delivery"
+description = "Batch generation on 4x A100: one prompt list, one model load per GPU group, full-opt profile."
+model_profile = "minimax_h3"
+inherit_profile_env = false
+submodule = "models/minimax_h3/A100"
+run_script = "run_minimax_h3_batch.sh"
+
+[runtime]
+root = "models/minimax_h3/A100"
+python = "python3"
+
+[official_config]
+revision = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86"
+num_gpus = 4
+context_parallel_degree = 4
+
+[env]
+H3_SOL_PROFILE = "fullopt_exact"
+H3_CONTAINER_RUNTIME = "pyxis"
+H3_CONTAINER_IMAGE = "docker://lmsysorg/sglang:nightly-dev-cu13-20260803-12eadf86"
+H3_MODEL_PATH = "MiniMaxAI/MiniMax-H3"
+H3_PROMPTS_FILE = "models/minimax_h3/demo_prompts.json"
+# One group of four GPUs. Add groups to generate in parallel -- "[0,1,2,3], [4,5,6,7]"
+# or "(0,1,2,3), (4,5,6,7)" -- and raise [slurm].gpus_per_node to match.
+H3_GPU_GROUPS = "[0,1,2,3]"
+# Must equal [official_config].num_gpus: the A100 runtime is pinned to four GPUs
+# per generation, so every group has to be exactly that wide.
+H3_GPUS_PER_GROUP = "4"
+# A warmup request is a full generation that gets deleted. Off for delivery runs,
+# on when the per-item timings are meant to be comparable to benchmark.json.
+H3_BATCH_WARMUP = "0"
+H3_MEASURED_NUM_STEPS = "50"
+H3_DURATION_SECONDS = "5.166667"
+H3_SEED = "0"
+HF_HUB_OFFLINE = "0"
+
+[slurm]
+account = ""
+partition = ""
+nodes = 1
+gpus_per_node = 4
+cpus_per_task = 48
+mem = "500G"
+time = "08:00:00"
+job_name = "h3-a100-batch"
+exclusive = false
+
+[artifacts]
+output_dir = "outputs"
+log = "run.log"
+benchmark = "batch.json"
