@@ -55,13 +55,15 @@ python3 scripts/build_stevo_bench_prompts.py
 nvidia-smi -L
 nvidia-smi topo -m
 
-# 6. 生成。一组四卡，或者这台机器能凑出几组不相交的四卡就开几组。
+# 6. 生成。一组四卡，或者这台机器能凑出几组不相交的四卡就开几组。长 prompt 在 A100
+#    上会出现约 0.25 的 BF16 单点尾差，所以这里只把该上限放宽到 0.3；整体误差校验不变。
 python3 scripts/run.py config/minimax_h3/minimax_h3_a100_batch.toml \
   --run-root "$ROOT/runs" \
   --set H3_STORAGE_ROOT="$ROOT" \
   --set H3_MODEL_PATH="$ROOT/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/$H3_REV" \
   --set H3_PROMPTS_FILE=models/minimax_h3/stevo_bench/prompts.json \
   --set H3_GPU_GROUPS="[0,1,2,3], [4,5,6,7]" \
+  --set H3_SOL_GATE_MAX_ABS=0.3 \
   --set H3_CONTAINER_RUNTIME=docker
 
 # 7. 把产物传到自己的 HF 仓库，然后就能停机了。机房出网快，内存盘活不过 brev stop，
