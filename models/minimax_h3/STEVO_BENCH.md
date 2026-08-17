@@ -15,9 +15,14 @@
 sudo mkdir -p /mnt/ram/hf /mnt/ram/runs
 sudo mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/hf
 sudo mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/runs
+# mode=1777 只作用在挂上去的两个 tmpfs 上；父目录是 sudo 建的，属 root，不给这一行
+# 的话第 1 步的 clone 会 Permission denied。
+sudo chown "$(id -u):$(id -g)" /mnt/ram
 
-# 之后所有东西都挂在这一个根下面：仓库、权重、prompt 列表、输出。容器模式下它会被
-# 挂载成 /h3，而 launcher 要求上述每一样都位于其下。跳过第 0 步就换成那块大盘。
+# ROOT 只是这篇文档里的一个 shell 变量，没有任何程序读它 —— 它存在的意义是让"用内存
+# 盘"和"用大盘"两条路共用同一套命令。之后仓库、权重、prompt 列表、输出全都落在它下面，
+# 因为容器模式下它会被挂载成 /h3，而 launcher 要求上述每一样都位于其下（见第 6 步的
+# H3_STORAGE_ROOT）。跳过第 0 步就把它指向那块大盘。
 export ROOT=/mnt/ram               # 不用内存盘：export ROOT=/large/disk
 
 # 1. 仓库。远端默认分支是 main，这套 runtime 在 sol-engine 上。
