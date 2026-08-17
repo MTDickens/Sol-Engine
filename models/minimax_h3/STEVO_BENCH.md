@@ -48,6 +48,8 @@ hf download MiniMaxAI/MiniMax-H3 --revision "$H3_REV"
 #    models/minimax_h3/stevo_bench/{prompts.json,frames/}，然后把下载删掉。
 python3 scripts/build_stevo_bench_prompts.py
 
+## Or if you want to use H3-Context-IR enhanced prompts: python3 scripts/build_stevo_bench_prompts.py --repo-id ycjian/StEvo-Bench-H3-Context-IR
+
 # 5. 从拓扑决定 GPU 分组。有 NVSwitch 时任意两卡都是 NVLink 直连，
 #    所以改按 CPU socket 边界分组。
 nvidia-smi -L
