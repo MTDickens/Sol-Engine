@@ -37,10 +37,12 @@ source .venv/bin/activate
 uv pip install huggingface_hub pyyaml
 
 # 3. 权重。`hf download` 会把整个仓库拉下来，实测约 344 GB —— model.toml 里那个
-#    269 GiB 说的是发布仓库本身，不是这条命令实际写盘的量。
+#    269 GiB 说的是发布仓库本身，不是这条命令实际写盘的量。显式指定 revision：
+#    运行时校验的就是这个 commit，快照目录也用它命名，第 6 步直接拼得出来。
 export HF_HOME="$ROOT/hf"
-hf auth login                      # 仅当该仓库对你是 gated 时才需要
-hf download MiniMaxAI/MiniMax-H3
+export H3_REV=bfc8ed0353f5a9733be73e6b2c98ec0948195b86
+hf auth login                      # 匿名下载会被限速，有 token 就登一下
+hf download MiniMaxAI/MiniMax-H3 --revision "$H3_REV"
 
 # 4. 拉取 StEvo-Bench 并转成 prompt 列表。下载的是 snapshot（不带 .git），产出
 #    models/minimax_h3/stevo_bench/{prompts.json,frames/}，然后把下载删掉。
@@ -55,24 +57,29 @@ nvidia-smi topo -m
 python3 scripts/run.py config/minimax_h3/minimax_h3_a100_batch.toml \
   --run-root "$ROOT/runs" \
   --set H3_STORAGE_ROOT="$ROOT" \
-  --set H3_MODEL_PATH="$ROOT"/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/<rev> \
+  --set H3_MODEL_PATH="$ROOT/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/$H3_REV" \
   --set H3_PROMPTS_FILE=models/minimax_h3/stevo_bench/prompts.json \
   --set H3_GPU_GROUPS="[0,1,2,3], [4,5,6,7]" \
-  --set H3_CONTAINER_RUNTIME=apptainer
+  --set H3_CONTAINER_RUNTIME=docker
 ```
 
 `--run-root` 接受绝对路径，把整个 bundle —— `launch.sh`、`manifest.resolved.toml`、
 `outputs/` —— 放到 `$ROOT/runs`。`H3_MODEL_PATH` 是把这次运行指向本地那份权重的开关；
-整行删掉就是让容器内自己从 Hub 拉。注意给这次运行设 `HF_HOME` 是没用的：容器模式下
+整行删掉就是让容器内自己从 Hub 拉。要是权重是不带 `--revision` 下的，快照目录名会是
+当时 `main` 解析到的 commit，用 `ls "$ROOT"/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/`
+看一眼实际的名字 —— 但那个 commit 未必等于运行时钉住的 `$H3_REV`。注意给这次运行设 `HF_HOME` 是没用的：容器模式下
 launcher 会在把路径重映射进 `/h3` 之后从 `H3_CACHE_ROOT` 推导出它，宿主上的值会被覆盖，
 它只对在容器外执行的 `hf download` 有意义。
 
 `H3_CONTAINER_RUNTIME` 跟着机器走，而不是跟着这次运行走，而配置里的默认值是给 Slurm 的：
 
-- **裸机**（Brev 实例、工作站）：用 `apptainer` 或 `singularity`，让 launcher 自己去拉
-  那个固定镜像。`none` 是直接在当前环境里跑，只有当那个环境**本身就是**那套固定的
-  SGLang 构建时才成立 —— runtime 会硬校验 torch `2.11.0+cu130` 和 Triton `3.6.0`，
-  对不上就拒绝。第 2 步那个 venv 不是它。
+- **裸机**（Brev 实例、工作站）：`docker`。Brev 的 VM Mode 自带 Docker 和 NVIDIA
+  runtime，而那个固定镜像本来就是 docker 镜像，所以这条路不用装任何东西。`apptainer` /
+  `singularity` 也支持，但机器上没有的话 launcher 只会去 `module load`（那是给 HPC
+  集群写的 fallback），在 Brev 上会直接 `module: command not found`。`none` 是在当前
+  环境里跑，只有当那个环境**本身就是**那套固定的 SGLang 构建时才成立 —— runtime 会
+  硬校验 torch `2.11.0+cu130` 和 Triton `3.6.0`，对不上就拒绝；第 2 步那个 venv 不是它。
+  容器内的文件按宿主的 uid:gid 写，需要 root 就 `H3_DOCKER_USER=root`。
 - **Slurm + pyxis**：就是配置的默认值，什么都不用设。但开两组时还需要把
   `[slurm].gpus_per_node` 改成 8 —— 那是个嵌套键，只能改配置文件，`--set` 够不着。
 

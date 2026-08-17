@@ -116,7 +116,8 @@ run then exits non-zero.
 - **Weights:** released BF16 FL2VA checkpoint; set `H3_MODEL_PATH` for an offline local copy.
 - **Placement:** four A100 GPUs with shared access to `H3_STORAGE_ROOT`.
 
-The launcher supports Pyxis, Apptainer/Singularity, and native execution. Site-specific Slurm account
+The launcher supports Pyxis, Docker, Apptainer/Singularity, and native execution
+(the batch launcher adds the Docker path; the single-prompt one predates it). Site-specific Slurm account
 and partition settings remain external to the config.
 
 ## Outputs

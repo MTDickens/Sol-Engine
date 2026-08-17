@@ -120,9 +120,12 @@ export TORCH_HOME=${inside_cache}/torch
 export XDG_CACHE_HOME=${inside_cache}/xdg
 export TMPDIR=/tmp
 
+# The variables the run needs on the other side of the container boundary.
+# pyxis takes the names, docker takes name=value pairs built from them.
+container_env=OUT_DIR,PYTHONPATH,H3_CONTAINER_RUNTIME,H3_STORAGE_ROOT,H3_CACHE_ROOT,H3_SGLANG_PYTHON_ROOT,H3_PYTHON_BIN,H3_MODEL_PATH,H3_MODEL_REVISION,H3_MODEL_SUBFOLDER,H3_PROMPTS_FILE,H3_GPU_GROUPS,H3_GPUS_PER_GROUP,H3_BATCH_WARMUP,H3_FIRST_FRAME_TASK,H3_IMAGE_CONDITION_JSON,H3_WARMUP_NUM_STEPS,H3_MEASURED_NUM_STEPS,H3_DURATION_SECONDS,H3_SEED,H3_WARMUP_SEED,H3_MASTER_PORT,H3_SOL_PROFILE,H3_EXPECTED_TORCH,H3_EXPECTED_TRITON,HF_HOME,HUGGINGFACE_HUB_CACHE,HF_HUB_DISABLE_XET,HF_HUB_DOWNLOAD_TIMEOUT,HF_HUB_OFFLINE,TRITON_CACHE_DIR,TORCH_HOME,XDG_CACHE_HOME,TMPDIR,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS,TOKENIZERS_PARALLELISM,PYTHONUNBUFFERED
+
 case "${requested_runtime}" in
   pyxis)
-    container_env=OUT_DIR,PYTHONPATH,H3_CONTAINER_RUNTIME,H3_STORAGE_ROOT,H3_CACHE_ROOT,H3_SGLANG_PYTHON_ROOT,H3_PYTHON_BIN,H3_MODEL_PATH,H3_MODEL_REVISION,H3_MODEL_SUBFOLDER,H3_PROMPTS_FILE,H3_GPU_GROUPS,H3_GPUS_PER_GROUP,H3_BATCH_WARMUP,H3_FIRST_FRAME_TASK,H3_IMAGE_CONDITION_JSON,H3_WARMUP_NUM_STEPS,H3_MEASURED_NUM_STEPS,H3_DURATION_SECONDS,H3_SEED,H3_WARMUP_SEED,H3_MASTER_PORT,H3_SOL_PROFILE,H3_EXPECTED_TORCH,H3_EXPECTED_TRITON,HF_HOME,HUGGINGFACE_HUB_CACHE,HF_HUB_DISABLE_XET,HF_HUB_DOWNLOAD_TIMEOUT,HF_HUB_OFFLINE,TRITON_CACHE_DIR,TORCH_HOME,XDG_CACHE_HOME,TMPDIR,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS,TOKENIZERS_PARALLELISM,PYTHONUNBUFFERED
     exec srun \
       --ntasks=1 \
       --nodes=1 \
@@ -132,6 +135,29 @@ case "${requested_runtime}" in
       --no-container-mount-home \
       --container-workdir="${inside_output}" \
       --no-container-entrypoint \
+      bash "${inside_repo}/models/minimax_h3/A100/run_minimax_h3_batch.sh"
+    ;;
+  docker)
+    # Brev-style bare node: Docker and the NVIDIA runtime are already there, and
+    # the pinned image is a Docker image to begin with. All eight devices are
+    # exposed -- batch_infer pins each group with CUDA_VISIBLE_DEVICES itself.
+    docker_env=()
+    IFS=',' read -r -a env_names <<< "${container_env}"
+    for name in "${env_names[@]}"; do
+      if [[ -n ${!name+x} ]]; then
+        docker_env+=(--env "${name}=${!name}")
+      fi
+    done
+    exec docker run --rm \
+      --gpus all \
+      --ipc=host \
+      --ulimit memlock=-1 \
+      --ulimit stack=67108864 \
+      --user "${H3_DOCKER_USER:-$(id -u):$(id -g)}" \
+      --volume "${host_storage_root}:/h3" \
+      --workdir "${inside_output}" \
+      "${docker_env[@]}" \
+      "${H3_CONTAINER_IMAGE#docker://}" \
       bash "${inside_repo}/models/minimax_h3/A100/run_minimax_h3_batch.sh"
     ;;
   apptainer|singularity)
@@ -152,7 +178,7 @@ case "${requested_runtime}" in
       bash "${inside_repo}/models/minimax_h3/A100/run_minimax_h3_batch.sh"
     ;;
   *)
-    echo "H3_CONTAINER_RUNTIME must be none, pyxis, apptainer, or singularity" >&2
+    echo "H3_CONTAINER_RUNTIME must be none, pyxis, docker, apptainer, or singularity" >&2
     exit 2
     ;;
 esac
