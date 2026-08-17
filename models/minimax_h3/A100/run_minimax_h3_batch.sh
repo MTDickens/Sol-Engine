@@ -67,6 +67,7 @@ H3_STORAGE_ROOT=$(cd "${H3_STORAGE_ROOT}" && pwd -P)
 host_storage_root=${H3_STORAGE_ROOT}
 OUT_DIR=$(cd "${OUT_DIR}" && pwd -P)
 H3_CACHE_ROOT=$(cd "${H3_CACHE_ROOT}" && pwd -P)
+host_cache_root=${H3_CACHE_ROOT}
 prompts_dir=$(cd "$(dirname "${H3_PROMPTS_FILE}")" && pwd -P)
 H3_PROMPTS_FILE=${prompts_dir}/$(basename "${H3_PROMPTS_FILE}")
 
@@ -148,6 +149,15 @@ case "${requested_runtime}" in
         docker_env+=(--env "${name}=${!name}")
       fi
     done
+    # Running as the host uid leaves it absent from the image's /etc/passwd, and
+    # torch resolves its inductor cache through getpass.getuser(), which falls
+    # back to pwd.getpwuid() and raises. getuser() reads these first, so setting
+    # them keeps the lookup from ever happening; HOME does the same for anything
+    # that expands "~".
+    mkdir -p "${host_cache_root}/home"
+    docker_env+=(--env "USER=$(id -un)")
+    docker_env+=(--env "LOGNAME=$(id -un)")
+    docker_env+=(--env "HOME=${inside_cache}/home")
     exec docker run --rm \
       --gpus all \
       --ipc=host \
