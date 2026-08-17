@@ -61,6 +61,27 @@ python3 scripts/run.py config/minimax_h3/minimax_h3_a100_batch.toml \
   --set H3_PROMPTS_FILE=models/minimax_h3/stevo_bench/prompts.json \
   --set H3_GPU_GROUPS="[0,1,2,3], [4,5,6,7]" \
   --set H3_CONTAINER_RUNTIME=docker
+
+# 7. 把产物传到自己的 HF 仓库，然后就能停机了。机房出网快，内存盘活不过 brev stop，
+#    所以这一步是停机前的必做项，不是可选项。
+export HF_REPO=your-username/stevo-bench-minimax-h3   # 换成你自己的
+RUN_DIR=$(ls -dt "$ROOT"/runs/*-minimax_h3_a100_batch | head -n1)
+ls "$RUN_DIR"/outputs/*.mp4 | wc -l          # 停机前先确认数量对得上
+
+hf auth whoami || hf auth login              # 需要有 write 权限的 token
+hf upload "$HF_REPO" "$RUN_DIR/outputs" outputs --repo-type dataset --private
+```
+
+第 7 步传的是整个 `outputs/`：221 个 mp4 加上 `batch.json` 和 `group*.log`，也就是逐条
+的耗时、seed、prompt 哈希和实际发出的 condition —— 视频离开这台机器之后，这些是唯一
+还能说明它们是怎么生成的东西。仓库不存在时 `hf upload` 会创建它，`--private` 只在创建
+那一刻生效（已存在的仓库不会被改成私有）。只要视频就加 `--include "*.mp4"`；如果 CLI
+版本对不上，`hf upload --help` 是准的。
+
+之后在任何一台机器上慢慢拉回来：
+
+```bash
+hf download "$HF_REPO" --repo-type dataset --local-dir ./stevo_out
 ```
 
 `--run-root` 接受绝对路径，把整个 bundle —— `launch.sh`、`manifest.resolved.toml`、
@@ -168,8 +189,9 @@ print(inspect.getsource(rv._validate_conditions))"
   那块 SSD 上。
 
 两个挂载都扛不过重启或 `brev stop`。丢掉 checkpoint 的代价是重新下载一次 —— 这是与
-grant 机时之间的权衡 —— 但视频也会一起没了，所以停实例之前记得把 `outputs/` 从挂载上
-拷走。放进 `provision.sh` 的话，`mount` 那几行要排在下载之前。
+grant 机时之间的权衡 —— 但视频也会一起没了，而它们是重跑 3.7 小时才能拿回来的东西，
+所以一条龙的第 7 步（传到 HF）在这套内存盘方案下是硬性的。放进 `provision.sh` 的话，
+`mount` 那几行要排在下载之前。
 
 ## 附记：开出这台八卡机器
 
