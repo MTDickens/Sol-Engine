@@ -10,10 +10,10 @@
 
 ```bash
 # 0.（可选，但推荐）把权重和产物放进内存盘。这台八卡实例有 1.9 TiB 内存，而它底下
-#    那块 Azure SSD 是整台机器上最慢的东西；269 GiB 的 checkpoint 每个 GPU 组要读一
+#    那块 Azure SSD 是整台机器上最慢的东西；~344 GB 的 checkpoint 每个 GPU 组要读一
 #    遍，放进 tmpfs 就一次都不走盘。需要 root，细节和注意事项见下面「内存盘」一节。
 sudo mkdir -p /mnt/ram/hf /mnt/ram/runs
-sudo mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/hf
+sudo mount -t tmpfs -o size=600G,mode=1777 tmpfs /mnt/ram/hf
 sudo mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/runs
 # mode=1777 只作用在挂上去的两个 tmpfs 上；父目录是 sudo 建的，属 root，不给这一行
 # 的话第 1 步的 clone 会 Permission denied。
@@ -36,7 +36,8 @@ uv venv --python 3.12
 source .venv/bin/activate
 uv pip install huggingface_hub pyyaml
 
-# 3. 权重：发布的 BF16 FL2VA checkpoint，269 GiB。
+# 3. 权重。`hf download` 会把整个仓库拉下来，实测约 344 GB —— model.toml 里那个
+#    269 GiB 说的是发布仓库本身，不是这条命令实际写盘的量。
 export HF_HOME="$ROOT/hf"
 hf auth login                      # 仅当该仓库对你是 gated 时才需要
 hf download MiniMaxAI/MiniMax-H3
@@ -120,8 +121,12 @@ launcher 会在 `/h3` 下解析它们。若某个任务的 `prompts.video_WM` �
 
 `size=` 是上限而不是预留 —— tmpfs 是有人写才分配一页 —— 所以 `runs` 那个挂载在用起来
 之前不花一分钱，而 221 个视频也就个位数 GB。真正花预算的是 checkpoint 那个挂载，而且它
-对整台机器只花一次：两个 GPU 组读的是同一份 tmpfs，所以 269 GiB 只从内存里扣一次，
-剩下的由两个加载进程分。
+对整台机器只花一次：两个 GPU 组读的是同一份 tmpfs，所以那 ~344 GB 只从内存里扣一次，
+剩下的由两个加载进程分。600G 的上限是留了余量的：整仓实测约 344 GB，而 `hf download`
+默认走 xet，其分块缓存默认也落在 `$HF_HOME` 下面，同样吃这个挂载的额度。300G 的上限
+会在下载接近尾声时以 `No space left on device` 失败。想省掉 xet 那部分，下载时加
+`HF_HUB_DISABLE_XET=1`（容器内的运行脚本本来就是这么设的），或者把 `HF_XET_CACHE`
+指到 SSD 上。
 
 注意仓库本身（`$ROOT/Sol-Engine`）落在 `/mnt/ram` 这个父文件系统上，也就是那块 SSD；
 进内存的只有权重和 run bundle 这两个挂载。`H3_STORAGE_ROOT` 必须是 `/mnt/ram` 而不是
@@ -184,6 +189,6 @@ ssh sana-8xa100
 - 在这个机型上，`[0,1,2,3], [4,5,6,7]` 同时也是 CPU socket 的边界，所以它就是第 5 步的
   `nvidia-smi topo -m` 应该印证的那个划分。96 个 vCPU 也正好能被两组各自已经申请的
   `cpus_per_task = 48` 分完。
-- Grant 机时从实例开始运行的那一刻就开始计费，所以镜像拉取和 269 GiB 的 checkpoint 下载
+- Grant 机时从实例开始运行的那一刻就开始计费，所以镜像拉取和 ~344 GB 的 checkpoint 下载
   应该放进 `--startup-script`，而不是放在交互会话里做。`H3_STORAGE_ROOT` 必须指向那块大盘，
   因为 prompt 列表、`frames/` 和输出目录都得在它下面，容器模式才解析得到。
