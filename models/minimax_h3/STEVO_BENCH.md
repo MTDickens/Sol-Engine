@@ -6,12 +6,23 @@
 
 ## 一条龙
 
-从一台干净的机器到视频跑起来。第 1-3 步是一次性的。
+从一台干净的机器到视频跑起来。第 0-3 步是一次性的。
 
 ```bash
+# 0.（可选，但推荐）把权重和产物放进内存盘。这台八卡实例有 1.9 TiB 内存，而它底下
+#    那块 Azure SSD 是整台机器上最慢的东西；269 GiB 的 checkpoint 每个 GPU 组要读一
+#    遍，放进 tmpfs 就一次都不走盘。需要 root，细节和注意事项见下面「内存盘」一节。
+sudo mkdir -p /mnt/ram/hf /mnt/ram/runs
+sudo mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/hf
+sudo mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/runs
+
+# 之后所有东西都挂在这一个根下面：仓库、权重、prompt 列表、输出。容器模式下它会被
+# 挂载成 /h3，而 launcher 要求上述每一样都位于其下。跳过第 0 步就换成那块大盘。
+export ROOT=/mnt/ram               # 不用内存盘：export ROOT=/large/disk
+
 # 1. 仓库。远端默认分支是 main，这套 runtime 在 sol-engine 上。
-git clone https://github.com/MTDickens/Sol-Engine.git
-cd Sol-Engine
+git clone https://github.com/MTDickens/Sol-Engine.git "$ROOT/Sol-Engine"
+cd "$ROOT/Sol-Engine"
 git switch sol-engine
 
 # 2. 宿主环境。这里只跑 launcher 和 prompt 构建脚本 —— GPU 那套栈在固定的 SGLang
@@ -20,8 +31,8 @@ uv venv --python 3.12
 source .venv/bin/activate
 uv pip install huggingface_hub pyyaml
 
-# 3. 权重：发布的 BF16 FL2VA checkpoint，269 GiB。HF_HOME 必须指向放得下它的盘。
-export HF_HOME=/large/disk/hf
+# 3. 权重：发布的 BF16 FL2VA checkpoint，269 GiB。
+export HF_HOME="$ROOT/hf"
 hf auth login                      # 仅当该仓库对你是 gated 时才需要
 hf download MiniMaxAI/MiniMax-H3
 
@@ -36,11 +47,19 @@ nvidia-smi topo -m
 
 # 6. 生成。一组四卡，或者这台机器能凑出几组不相交的四卡就开几组。
 python3 scripts/run.py config/minimax_h3/minimax_h3_a100_batch.toml \
+  --run-root "$ROOT/runs" \
+  --set H3_STORAGE_ROOT="$ROOT" \
+  --set H3_MODEL_PATH="$ROOT"/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/<rev> \
   --set H3_PROMPTS_FILE=models/minimax_h3/stevo_bench/prompts.json \
   --set H3_GPU_GROUPS="[0,1,2,3], [4,5,6,7]" \
-  --set H3_CONTAINER_RUNTIME=apptainer \
-  --set H3_MODEL_PATH=/large/disk/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/<rev>
+  --set H3_CONTAINER_RUNTIME=apptainer
 ```
+
+`--run-root` 接受绝对路径，把整个 bundle —— `launch.sh`、`manifest.resolved.toml`、
+`outputs/` —— 放到 `$ROOT/runs`。`H3_MODEL_PATH` 是把这次运行指向本地那份权重的开关；
+整行删掉就是让容器内自己从 Hub 拉。注意给这次运行设 `HF_HOME` 是没用的：容器模式下
+launcher 会在把路径重映射进 `/h3` 之后从 `H3_CACHE_ROOT` 推导出它，宿主上的值会被覆盖，
+它只对在容器外执行的 `hf download` 有意义。
 
 `H3_CONTAINER_RUNTIME` 跟着机器走，而不是跟着这次运行走，而配置里的默认值是给 Slurm 的：
 
@@ -53,12 +72,6 @@ python3 scripts/run.py config/minimax_h3/minimax_h3_a100_batch.toml \
 
 无论哪种方式，整次运行都只在一个容器里：launcher 是把各组作为进程展开、各自钉住
 `CUDA_VISIBLE_DEVICES`，而不是拆成多个作业。
-
-容器模式下，牵涉到的每一个路径 —— 仓库、prompt 列表、`frames/`、cache、输出目录、
-以及本地 checkpoint —— 都必须位于 `H3_STORAGE_ROOT` 之下，它会被挂载到 `/h3`。
-该变量默认是仓库根目录，所以要么把 clone 和 `HF_HOME` 放在同一块大盘上，要么设
-`--set H3_STORAGE_ROOT=/large/disk` 并把所有东西都放到它下面。不想管本地权重路径，
-就把 `H3_MODEL_PATH` 整行删掉，让容器内直接从 Hub 拉。
 
 ## 选择任务集
 
@@ -98,51 +111,17 @@ launcher 会在 `/h3` 下解析它们。若某个任务的 `prompts.video_WM` �
 `H3_FIRST_FRAME_TASK` 和 `H3_IMAGE_CONDITION_JSON` 覆盖，实际发出去的内容会逐条
 记录在 `batch.json` 里。
 
-## 可选：把 checkpoint 和产物放进内存
+## 内存盘（一条龙第 0 步）
 
-这台八卡实例有 1.9 TiB 内存，而它底下那块 Azure SSD 是整台机器上最慢的东西。
-269 GiB 的 checkpoint 在模型加载时每个 GPU 组要读一遍，而它其实完全不必碰那块盘：
-直接下载进 tmpfs，之后每次都从内存读，一次都不走 SSD。挂两个，一个放权重，一个放
-run bundle：
-
-```bash
-# 放在 provision.sh 里，下载之前执行。
-mkdir -p /mnt/ram/hf /mnt/ram/runs
-mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/hf
-mount -t tmpfs -o size=300G,mode=1777 tmpfs /mnt/ram/runs
-```
-
-`size=` 是上限而不是预留 —— tmpfs 是有人写才分配一页 —— 所以第二个挂载在用起来之前
-不花一分钱，而 221 个视频也就个位数 GB。真正花预算的是 checkpoint 那个挂载，而且它
+`size=` 是上限而不是预留 —— tmpfs 是有人写才分配一页 —— 所以 `runs` 那个挂载在用起来
+之前不花一分钱，而 221 个视频也就个位数 GB。真正花预算的是 checkpoint 那个挂载，而且它
 对整台机器只花一次：两个 GPU 组读的是同一份 tmpfs，所以 269 GiB 只从内存里扣一次，
 剩下的由两个加载进程分。
 
-这样一来 storage root 就必须是这两个挂载的父目录，clone 也得跟着挪到它下面。
-第 1-2 步除了路径以外没有变化，第 3 步和第 6 步变成：
-
-```bash
-git clone https://github.com/MTDickens/Sol-Engine.git /mnt/ram/Sol-Engine
-
-export HF_HOME=/mnt/ram/hf
-hf download MiniMaxAI/MiniMax-H3
-
-python3 scripts/run.py config/minimax_h3/minimax_h3_a100_batch.toml \
-  --run-root /mnt/ram/runs \
-  --set H3_STORAGE_ROOT=/mnt/ram \
-  --set H3_MODEL_PATH=/mnt/ram/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/<rev> \
-  --set H3_PROMPTS_FILE=models/minimax_h3/stevo_bench/prompts.json \
-  --set H3_GPU_GROUPS="[0,1,2,3], [4,5,6,7]" \
-  --set H3_CONTAINER_RUNTIME=apptainer
-```
-
-`--run-root` 接受绝对路径，会把整个 bundle —— `launch.sh`、`manifest.resolved.toml`、
-`outputs/` —— 放到第二个挂载上。`H3_STORAGE_ROOT` 必须是 `/mnt/ram` 而不是其中任何
-一个挂载，因为仓库、prompt 列表、输出目录和本地 checkpoint 全都得在它下面，否则
-launcher 会直接拒绝这次运行。
-
-给这次运行设 `HF_HOME` 是没用的。容器模式下 launcher 会在把路径重映射进 `/h3` 之后
-从 `H3_CACHE_ROOT` 推导出它，宿主上的值会被覆盖；它只对在容器外执行的 `hf download`
-有意义。真正把运行指向 tmpfs 那份副本的是 `H3_MODEL_PATH`。
+注意仓库本身（`$ROOT/Sol-Engine`）落在 `/mnt/ram` 这个父文件系统上，也就是那块 SSD；
+进内存的只有权重和 run bundle 这两个挂载。`H3_STORAGE_ROOT` 必须是 `/mnt/ram` 而不是
+其中任何一个挂载，因为仓库、prompt 列表、输出目录和本地 checkpoint 全都得在它下面，
+否则 launcher 会直接拒绝这次运行。
 
 在投入 3.7 小时之前有两件事要确认：
 
@@ -157,7 +136,7 @@ launcher 会直接拒绝这次运行。
 
 两个挂载都扛不过重启或 `brev stop`。丢掉 checkpoint 的代价是重新下载一次 —— 这是与
 grant 机时之间的权衡 —— 但视频也会一起没了，所以停实例之前记得把 `outputs/` 从挂载上
-拷走。
+拷走。放进 `provision.sh` 的话，`mount` 那几行要排在下载之前。
 
 ## 附记：开出这台八卡机器
 
