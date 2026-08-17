@@ -119,10 +119,26 @@ launcher 会在 `/h3` 下解析它们。若某个任务的 `prompts.video_WM` �
 
 批量 runner 的一切 —— prompt 列表的几种写法、GPU 分组、warmup、`batch.json` ——
 都在 [`A100/README.md`](A100/README.md#batch-generation)。这里只强调一条：带 `image`
-的条目会以 `fl2va` 请求发出，而不是 `t2va`，而具体的 task 名和 condition 条目的形状
-在本仓库里找不到任何一个已有的条件请求可供核对。两者都可以用
-`H3_FIRST_FRAME_TASK` 和 `H3_IMAGE_CONDITION_JSON` 覆盖，实际发出去的内容会逐条
-记录在 `batch.json` 里。
+的条目会以 `fl2va` 请求发出，而不是 `t2va`，condition 条目形如
+
+```json
+{"type": "image", "role": "keyframe", "uri": "<初始帧路径>", "frame_index": 0}
+```
+
+这是照着固定镜像里 `_validate_conditions` 的实现写的：允许的键只有
+`role`/`type`/`uri`/`frame_index`/`start_time_seconds`，`role` 只能是 `keyframe` 或
+`reference`，keyframe 必须给 `frame_index`（`0` 是首帧，`-1` 是末帧哨兵，取值按 17n+5
+对齐后的帧数校验 —— 本配置是 124）。换了镜像而 schema 变了的话，用
+`H3_FIRST_FRAME_TASK` 和 `H3_IMAGE_CONDITION_JSON` 覆盖即可，实际发出去的内容会逐条
+记录在 `batch.json` 里。想直接读那份 schema：
+
+```bash
+docker run --rm lmsysorg/sglang:nightly-dev-cu13-20260803-12eadf86 python3 -c "
+import inspect
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3 \
+  import request_validation as rv
+print(inspect.getsource(rv._validate_conditions))"
+```
 
 ## 内存盘（一条龙第 0 步）
 

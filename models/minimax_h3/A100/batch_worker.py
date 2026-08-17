@@ -39,7 +39,17 @@ HARDWARE = gpu_infer.HARDWARE
 PROFILE = gpu_infer.PROFILE
 TRUE_VALUES = {"1", "true", "yes", "on"}
 IMAGE_PLACEHOLDER = "{image}"
-DEFAULT_IMAGE_CONDITION = {"type": "image", "role": "first_frame", "path": IMAGE_PLACEHOLDER}
+# Shape taken from _validate_conditions in the pinned build: the allowed keys are
+# role/type/uri/frame_index/start_time_seconds, role is keyframe or reference, and
+# a keyframe rule requires frame_index -- 0 for the first frame, -1 being the
+# last-frame sentinel. Frame indices are checked against the 17n+5 aligned frame
+# count, which is 124 for this profile's duration.
+DEFAULT_IMAGE_CONDITION = {
+    "type": "image",
+    "role": "keyframe",
+    "uri": IMAGE_PLACEHOLDER,
+    "frame_index": 0,
+}
 
 
 def _substitute(value: Any, image: str) -> Any:
@@ -55,19 +65,21 @@ def _substitute(value: Any, image: str) -> Any:
 def _image_request(image: str) -> tuple[str, list[Any]]:
     """Return the (task, conditions) an item with a first frame is sent with.
 
-    This is the one piece of the batch path that could not be checked against
-    anything on disk: no runtime in this tree issues a conditioned request, so
-    the condition entry's key names come from SGLang's sampling params inside
-    the pinned image rather than from a working example here. Both halves are
-    therefore environment-overridable, so correcting them is a config change:
+    The default matches the validator in the pinned build, but both halves stay
+    environment-overridable so a build whose schema differs is a config change
+    rather than a code change:
 
-        H3_FIRST_FRAME_TASK    task name for a first-frame request (default fl2va,
-                               the variant these weights are loaded as)
+        H3_FIRST_FRAME_TASK      task name for a first-frame request (default
+                                 fl2va, the variant these weights load as)
         H3_IMAGE_CONDITION_JSON  the condition entry as JSON; every "{image}"
-                               inside it is replaced with the resolved path
+                                 inside it is replaced with the resolved path
 
     Whatever is used ends up in batch.json, so a rejected request shows exactly
-    what was sent.
+    what was sent. To read the schema this is written against:
+
+        docker run --rm <image> python3 -c "import inspect; from \
+          sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3 \
+          import request_validation as rv; print(inspect.getsource(rv._validate_conditions))"
     """
 
     task = os.environ.get("H3_FIRST_FRAME_TASK", "").strip() or "fl2va"
@@ -209,6 +221,10 @@ def main() -> int:
     # short batch and buys nothing that ends up on disk. Turn it on to restore
     # the benchmark path's steady-state timings and route-density telemetry.
     warmup_enabled = os.environ.get("H3_BATCH_WARMUP", "0").strip().lower() in TRUE_VALUES
+    # A malformed request or a dead generator fails every remaining item the same
+    # way, and 221 identical tracebacks bury the one that explains it. Stop the
+    # shard once that many failures arrive back to back with nothing in between.
+    failure_limit = int(os.environ.get("H3_BATCH_MAX_CONSECUTIVE_FAILURES", "3"))
     os.environ.setdefault("H3_EASYCACHE_NUM_FORWARDS", str(steps - 1))
 
     # Both files are per group: the epoch file is how the adapter detects a new
@@ -271,7 +287,26 @@ def main() -> int:
             warmup_record["output_file"] = None
             (output_dir / warmup_name).unlink(missing_ok=True)
 
+        consecutive_failures = 0
         for position, item in enumerate(items):
+            if failure_limit > 0 and consecutive_failures >= failure_limit:
+                print(
+                    f"stopping this shard: {consecutive_failures} consecutive "
+                    f"failures, {len(items) - position} item(s) not attempted",
+                    flush=True,
+                )
+                records.extend(
+                    {
+                        "index": pending["index"],
+                        "video_name": pending["video_name"],
+                        "image": pending.get("image"),
+                        "status": "skipped",
+                        "error": "not attempted: the shard stopped after "
+                        f"{consecutive_failures} consecutive failures",
+                    }
+                    for pending in items[position:]
+                )
+                break
             name = item["video_name"]
             seed = default_seed if item.get("seed") is None else int(item["seed"])
             epoch = f"{PROFILE.name}:measured:{group}:{item['index']:04d}:{time.time_ns()}"
@@ -324,6 +359,7 @@ def main() -> int:
                 record["status"] = "failed"
                 record["error"] = f"{type(exc).__name__}: {exc}"
                 traceback.print_exc()
+            consecutive_failures = 0 if record["status"] == "ok" else consecutive_failures + 1
             records.append(record)
         status = "ok" if all(record["status"] == "ok" for record in records) else "partial"
     finally:
